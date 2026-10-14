@@ -1,0 +1,13 @@
+{
+  "name": "text-hoster",
+  "version": "1.0.0",
+  "description": "Host text files to copy full content easily",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "express-fileupload": "^1.5.1"
+  }
+}
