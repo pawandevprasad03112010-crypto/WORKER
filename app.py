@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-# आपके AWS और DynamoDB क्रेडेंशियल्स
+# Aapke AWS aur DynamoDB credentials
 AWS_ACCESS_KEY_ID = "AKIA32VVAONMQV5QKNED"
 AWS_SECRET_ACCESS_KEY = "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"
 REGION = "ap-south-1"
@@ -15,7 +15,7 @@ TABLE_NAME = "LARGE_PROPERTY_LISTING"
 PRIMARY_KEY = "property_id"
 
 def clean_and_convert_data(obj):
-    """ None वैल्यूज़ को हटाना और float को Decimal में बदलना ताकि DynamoDB एक्सेप्ट करे """
+    """ None values ko hatana aur float ko Decimal mein badalna taaki DynamoDB accept kare """
     if isinstance(obj, list):
         return [clean_and_convert_data(v) for v in obj if v is not None]
     elif isinstance(obj, dict):
@@ -27,24 +27,36 @@ def clean_and_convert_data(obj):
     else:
         return str(obj) if isinstance(obj, str) else obj
 
-def find_property_id(obj, target_key):
-    """ नेस्टेड लिस्ट या डिक्शनरी के अंदर से property_id ढूंढने का रिकर्सिव फंक्शन """
+def find_property_id(obj):
+    """ Sahi property_id dhundhne ka smart function jo tags/headings ko ignore karega """
+    ignore_keys = {"PRIMARY_TAGS", "SECONDARY_TAGS", "tags", "amenities", "photos"}
+    
     if isinstance(obj, dict):
-        if target_key in obj and obj[target_key] is not None:
-            return str(obj[target_key])
+        # Pehle direct standard keys check karein
+        for key in ["property_id", "propertyId", "id", "serial_no"]:
+            if key in obj and obj[key] is not None and str(obj[key]).strip() != "":
+                val = str(obj[key]).strip()
+                if val not in ignore_keys:
+                    return val
+                    
+        # Phir recursive search karein lekin ignore_keys ko chhod kar
         for k, v in obj.items():
-            result = find_property_id(v, target_key)
-            if result:
+            if k in ignore_keys:
+                continue
+            result = find_property_id(v)
+            if result and result not in ignore_keys:
                 return result
+                
     elif isinstance(obj, list):
         for item in obj:
-            result = find_property_id(item, target_key)
-            if result:
+            result = find_property_id(item)
+            if result and result not in ignore_keys:
                 return result
+                
     return None
 
 def extract_main_dict(obj):
-    """ नेस्टेड लिस्ट में से मुख्य डिक्शनरी ढूंढकर बाहर निकालना """
+    """ Nested list mein se mukhy dictionary nikalna """
     if isinstance(obj, dict):
         return obj
     elif isinstance(obj, list):
@@ -179,24 +191,16 @@ async def upload_single(file: UploadFile = File(...)):
         except Exception as json_err:
             raise HTTPException(status_code=400, detail="Invalid JSON format in file")
         
-        # 1. नेस्टेड स्ट्रक्चर से property_id ढूंढना
-        prop_id = find_property_id(raw_data, PRIMARY_KEY)
-        if not prop_id:
-            # अन्य संभावित की (Keys) से भी चेक करना
-            for alt_key in ["id", "propertyId", "serial_no"]:
-                prop_id = find_property_id(raw_data, alt_key)
-                if prop_id:
-                    break
+        # Sahi property_id nikalna
+        prop_id = find_property_id(raw_data)
 
         if not prop_id:
             raise HTTPException(status_code=400, detail="JSON file does not contain property_id")
 
-        # 2. डेटा को सही डिक्शनरी फॉर्मेट में निकालना ताकि DynamoDB में सेव हो सके
         main_dict = extract_main_dict(raw_data)
         if not main_dict:
             raise HTTPException(status_code=400, detail="Invalid JSON data structure")
 
-        # सुनिश्चित करना कि डिक्शनरी में property_id सेट हो
         main_dict[PRIMARY_KEY] = str(prop_id)
 
         cleaned_data = clean_and_convert_data(main_dict)
