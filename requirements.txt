@@ -1,7 +1,5 @@
-Flask
-cloudinary
-Pillow
-opencv-python-headless
-requests
-gunicorn
-numpy
+fastapi
+uvicorn
+boto3
+jinja2
+python-multipart
