@@ -36,7 +36,7 @@ def find_property_id(obj):
             if key in obj and obj[key] is not None and str(obj[key]).strip() != "":
                 val = str(obj[key]).strip()
                 if val not in ignore_keys:
-                return val
+                    return val  # Sahi indentation yahan set kar di gayi hai
                     
         for k, v in obj.items():
             if k in ignore_keys:
@@ -199,7 +199,6 @@ async def upload_single(file: UploadFile = File(...)):
 
         main_dict = extract_main_dict(raw_data)
         if not main_dict:
-            # Agar main_dict list ke roop mein hai aur extract nahi hua
             if isinstance(raw_data, list) and len(raw_data) > 0 and isinstance(raw_data[0], dict):
                 main_dict = raw_data[0]
             else:
