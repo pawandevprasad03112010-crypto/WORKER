@@ -1,104 +1,82 @@
 import os
-import io
-import requests
-import numpy as np
-import cv2
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
-from flask import Flask, render_template, request, jsonify
+import json
+from decimal import Decimal
+import boto3
+from fastapi import FastAPI, UploadFile, File, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 
-app = Flask(__name__)
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
-    secure=True
-)
+# Aapke AWS aur DynamoDB credentials
+AWS_ACCESS_KEY_ID = "AKIA32VVAONMQV5QKNED"
+AWS_SECRET_ACCESS_KEY = "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"
+REGION = "ap-south-1"
+TABLE_NAME = "LARGE_PROPERTY_LISTING"
+PRIMARY_KEY = "property_id"
 
-def auto_detect_and_inpaint_watermark(image_bytes):
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    h, w = img.shape[:2]
+def clean_and_convert_data(obj):
+    """ None values ko hatana aur float ko Decimal mein badalna taaki DynamoDB accept kare """
+    if isinstance(obj, list):
+        return [clean_and_convert_data(v) for v in obj if v is not None]
+    elif isinstance(obj, dict):
+        return {str(k): clean_and_convert_data(v) for k, v in obj.items() if v is not None and v != ""}
+    elif isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, int):
+        return int(obj)
+    else:
+        return str(obj) if isinstance(obj, str) else obj
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-    )
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5))
-    dilated = cv2.dilate(thresh, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    mask = np.zeros((h, w), dtype=np.uint8)
-    found_any = False
-
-    for cnt in contours:
-        x, y, cw, ch = cv2.boundingRect(cnt)
-        aspect_ratio = cw / float(ch)
-        
-        if cw > 40 and ch > 10 and aspect_ratio > 1.5 and cw < w * 0.8:
-            px = int(cw * 0.1)
-            py = int(ch * 0.15)
-            x1, y1 = max(0, x - px), max(0, y - py)
-            x2, y2 = min(w, x + cw + px), min(h, y + ch + py)
-            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
-            found_any = True
-
-    if not found_any:
-        cv2.rectangle(mask, (int(w * 0.25), int(h * 0.35)), (int(w * 0.75), int(h * 0.65)), 255, -1)
-        cv2.rectangle(mask, (0, 0), (int(w * 0.35), int(h * 0.25)), 255, -1)
-
-    cleaned_img = cv2.inpaint(img, mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
-    is_success, buffer = cv2.imencode(".jpg", cleaned_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    return buffer.tobytes()
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/api/clean-batch', methods=['POST'])
-def clean_batch():
+@app.post("/upload-single")
+async def upload_single(file: UploadFile = File(...)):
     try:
-        data = request.json or {}
-        next_cursor = data.get('next_cursor', None)
+        content = await file.read()
+        
+        try:
+            raw_data = json.loads(content.decode('utf-8'))
+        except Exception as json_err:
+            raise HTTPException(status_code=400, detail="Invalid JSON format in file")
+        
+        # Yadi JSON root list hai (jaise [...]), toh uska pehla dictionary item lein
+        if isinstance(raw_data, list):
+            if len(raw_data) > 0 and isinstance(raw_data[0], dict):
+                data = raw_data[0]
+            else:
+                raise HTTPException(status_code=400, detail="Empty or invalid JSON list")
+        elif isinstance(raw_data, dict):
+            data = raw_data
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported JSON structure")
 
-        params = {"type": "upload", "resource_type": "image", "max_results": 20}
-        if next_cursor:
-            params["next_cursor"] = next_cursor
-
-        res = cloudinary.api.resources(**params)
-        resources = res.get('resources', [])
-        new_cursor = res.get('next_cursor', None)
-
-        processed_count = 0
-        for item in resources:
-            pid = item['public_id']
-            img_url = item['secure_url']
+        # JSON file ke andar se original property_id uthana
+        prop_id = data.get(PRIMARY_KEY)
+        
+        if not prop_id:
+            raise HTTPException(status_code=400, detail="JSON file does not contain property_id")
             
-            resp = requests.get(img_url)
-            if resp.status_code == 200:
-                cleaned_bytes = auto_detect_and_inpaint_watermark(resp.content)
-                cloudinary.uploader.upload(
-                    cleaned_bytes,
-                    public_id=pid,
-                    overwrite=True,
-                    invalidate=True
-                )
-                processed_count += 1
+        # Data cleaning
+        cleaned_data = clean_and_convert_data(data)
 
-        return jsonify({
-            "success": True,
-            "processed_count": processed_count,
-            "next_cursor": new_cursor,
-            "is_complete": new_cursor is None
-        })
+        # DynamoDB connection aur save karna
+        dynamodb = boto3.resource(
+            'dynamodb',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=REGION
+        )
+        table = dynamodb.Table(TABLE_NAME)
+        table.put_item(Item=cleaned_data)
 
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        print(f"Successfully uploaded Property ID: {prop_id} to {TABLE_NAME}")
+        return {"success": True, "property_id": str(prop_id), "filename": file.filename}
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
-    
+    except Exception as ex:
+        print(f"❌ Error uploading {file.filename}: {str(ex)}")
+        raise HTTPException(status_code=400, detail=str(ex))
+        
