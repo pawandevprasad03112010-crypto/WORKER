@@ -27,6 +27,33 @@ def clean_and_convert_data(obj):
     else:
         return str(obj) if isinstance(obj, str) else obj
 
+def find_property_id(obj, target_key):
+    """ नेस्टेड लिस्ट या डिक्शनरी के अंदर से property_id ढूंढने का रिकर्सिव फंक्शन """
+    if isinstance(obj, dict):
+        if target_key in obj and obj[target_key] is not None:
+            return str(obj[target_key])
+        for k, v in obj.items():
+            result = find_property_id(v, target_key)
+            if result:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = find_property_id(item, target_key)
+            if result:
+                return result
+    return None
+
+def extract_main_dict(obj):
+    """ नेस्टेड लिस्ट में से मुख्य डिक्शनरी ढूंढकर बाहर निकालना """
+    if isinstance(obj, dict):
+        return obj
+    elif isinstance(obj, list):
+        for item in obj:
+            res = extract_main_dict(item)
+            if res:
+                return res
+    return None
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return """<!DOCTYPE html>
@@ -152,22 +179,27 @@ async def upload_single(file: UploadFile = File(...)):
         except Exception as json_err:
             raise HTTPException(status_code=400, detail="Invalid JSON format in file")
         
-        if isinstance(raw_data, list):
-            if len(raw_data) > 0 and isinstance(raw_data[0], dict):
-                data = raw_data[0]
-            else:
-                raise HTTPException(status_code=400, detail="Empty or invalid JSON list")
-        elif isinstance(raw_data, dict):
-            data = raw_data
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported JSON structure")
+        # 1. नेस्टेड स्ट्रक्चर से property_id ढूंढना
+        prop_id = find_property_id(raw_data, PRIMARY_KEY)
+        if not prop_id:
+            # अन्य संभावित की (Keys) से भी चेक करना
+            for alt_key in ["id", "propertyId", "serial_no"]:
+                prop_id = find_property_id(raw_data, alt_key)
+                if prop_id:
+                    break
 
-        prop_id = data.get(PRIMARY_KEY)
-        
         if not prop_id:
             raise HTTPException(status_code=400, detail="JSON file does not contain property_id")
-            
-        cleaned_data = clean_and_convert_data(data)
+
+        # 2. डेटा को सही डिक्शनरी फॉर्मेट में निकालना ताकि DynamoDB में सेव हो सके
+        main_dict = extract_main_dict(raw_data)
+        if not main_dict:
+            raise HTTPException(status_code=400, detail="Invalid JSON data structure")
+
+        # सुनिश्चित करना कि डिक्शनरी में property_id सेट हो
+        main_dict[PRIMARY_KEY] = str(prop_id)
+
+        cleaned_data = clean_and_convert_data(main_dict)
 
         dynamodb = boto3.resource(
             'dynamodb',
