@@ -28,18 +28,16 @@ def clean_and_convert_data(obj):
         return str(obj) if isinstance(obj, str) else obj
 
 def find_property_id(obj):
-    """ Sahi property_id dhundhne ka smart function jo tags/headings ko ignore karega """
+    """ JSON ke andar se property ID dhundhne ka smart function """
     ignore_keys = {"PRIMARY_TAGS", "SECONDARY_TAGS", "tags", "amenities", "photos"}
     
     if isinstance(obj, dict):
-        # Pehle direct standard keys check karein
-        for key in ["property_id", "propertyId", "id", "serial_no"]:
+        for key in ["property_id", "propertyId", "id", "serial_no", "prop_id"]:
             if key in obj and obj[key] is not None and str(obj[key]).strip() != "":
                 val = str(obj[key]).strip()
                 if val not in ignore_keys:
-                    return val
+                return val
                     
-        # Phir recursive search karein lekin ignore_keys ko chhod kar
         for k, v in obj.items():
             if k in ignore_keys:
                 continue
@@ -56,7 +54,7 @@ def find_property_id(obj):
     return None
 
 def extract_main_dict(obj):
-    """ Nested list mein se mukhy dictionary nikalna """
+    """ Nested list ya dict mein se mukhy dictionary nikalna """
     if isinstance(obj, dict):
         return obj
     elif isinstance(obj, list):
@@ -191,15 +189,21 @@ async def upload_single(file: UploadFile = File(...)):
         except Exception as json_err:
             raise HTTPException(status_code=400, detail="Invalid JSON format in file")
         
-        # Sahi property_id nikalna
+        # 1. JSON ke andar se property ID dhundhna
         prop_id = find_property_id(raw_data)
 
+        # 2. Agar JSON ke andar property_id na mile, toh file name se property ID nikal lena
         if not prop_id:
-            raise HTTPException(status_code=400, detail="JSON file does not contain property_id")
+            filename = file.filename
+            prop_id = filename.split('.')[0] if '.' in filename else filename
 
         main_dict = extract_main_dict(raw_data)
         if not main_dict:
-            raise HTTPException(status_code=400, detail="Invalid JSON data structure")
+            # Agar main_dict list ke roop mein hai aur extract nahi hua
+            if isinstance(raw_data, list) and len(raw_data) > 0 and isinstance(raw_data[0], dict):
+                main_dict = raw_data[0]
+            else:
+                main_dict = {"raw_content": raw_data}
 
         main_dict[PRIMARY_KEY] = str(prop_id)
 
