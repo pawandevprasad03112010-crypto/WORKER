@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 from decimal import Decimal
 import boto3
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -7,7 +8,7 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-# Aapke AWS aur DynamoDB credentials
+# आपके AWS और DynamoDB क्रेडेंशियल्स
 AWS_ACCESS_KEY_ID = "AKIA32VVAONMQV5QKNED"
 AWS_SECRET_ACCESS_KEY = "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"
 REGION = "ap-south-1"
@@ -15,7 +16,7 @@ TABLE_NAME = "LARGE_PROPERTY_LISTING"
 PRIMARY_KEY = "property_id"
 
 def clean_and_convert_data(obj):
-    """ None values ko hatana aur float ko Decimal mein badalna taaki DynamoDB accept kare """
+    """ None वैल्यूज़ को हटाना और float को Decimal में बदलना ताकि DynamoDB एक्सेप्ट करे """
     if isinstance(obj, list):
         return [clean_and_convert_data(v) for v in obj if v is not None]
     elif isinstance(obj, dict):
@@ -27,34 +28,8 @@ def clean_and_convert_data(obj):
     else:
         return str(obj) if isinstance(obj, str) else obj
 
-def find_property_id(obj):
-    """ JSON ke andar se property ID dhundhne ka smart function """
-    ignore_keys = {"PRIMARY_TAGS", "SECONDARY_TAGS", "tags", "amenities", "photos"}
-    
-    if isinstance(obj, dict):
-        for key in ["property_id", "propertyId", "id", "serial_no", "prop_id"]:
-            if key in obj and obj[key] is not None and str(obj[key]).strip() != "":
-                val = str(obj[key]).strip()
-                if val not in ignore_keys:
-                    return val  # Sahi indentation yahan set kar di gayi hai
-                    
-        for k, v in obj.items():
-            if k in ignore_keys:
-                continue
-            result = find_property_id(v)
-            if result and result not in ignore_keys:
-                return result
-                
-    elif isinstance(obj, list):
-        for item in obj:
-            result = find_property_id(item)
-            if result and result not in ignore_keys:
-                return result
-                
-    return None
-
 def extract_main_dict(obj):
-    """ Nested list ya dict mein se mukhy dictionary nikalna """
+    """ नेस्टेड लिस्ट या dict में से मुख्य डिक्शनरी निकालना """
     if isinstance(obj, dict):
         return obj
     elif isinstance(obj, list):
@@ -128,7 +103,7 @@ async def index():
                 container.innerHTML += `
                     <div id="${rowId}" class="flex items-center justify-between p-3 bg-gray-50 border rounded-lg text-sm">
                         <div class="truncate w-1/2 font-mono text-gray-700">${file.name}</div>
-                        <div class="text-xs text-gray-500 property-id-text">ID: स्कैन हो रहा है...</div>
+                        <div class="text-xs text-gray-500 property-id-text">ID: सेव हो रहा है...</div>
                         <div class="status-badge px-3 py-1 rounded text-xs font-bold bg-yellow-100 text-yellow-800">पेंडिंग...</div>
                     </div>
                 `;
@@ -189,14 +164,7 @@ async def upload_single(file: UploadFile = File(...)):
         except Exception as json_err:
             raise HTTPException(status_code=400, detail="Invalid JSON format in file")
         
-        # 1. JSON ke andar se property ID dhundhna
-        prop_id = find_property_id(raw_data)
-
-        # 2. Agar JSON ke andar property_id na mile, toh file name se property ID nikal lena
-        if not prop_id:
-            filename = file.filename
-            prop_id = filename.split('.')[0] if '.' in filename else filename
-
+        # मुख्य डिक्शनरी निकालना (नेस्टेड स्ट्रक्चर से सुरक्षित रूप से बाहर लाना)
         main_dict = extract_main_dict(raw_data)
         if not main_dict:
             if isinstance(raw_data, list) and len(raw_data) > 0 and isinstance(raw_data[0], dict):
@@ -204,10 +172,16 @@ async def upload_single(file: UploadFile = File(...)):
             else:
                 main_dict = {"raw_content": raw_data}
 
-        main_dict[PRIMARY_KEY] = str(prop_id)
+        # 🚀 यदि JSON के अंदर अपनी खुद की property_id नहीं है, तो NoSQL/DynamoDB के लिए एक नई यूनिक आईडी (UUID) जनरेट कर देना
+        if PRIMARY_KEY not in main_dict or not main_dict[PRIMARY_KEY]:
+            main_dict[PRIMARY_KEY] = str(uuid.uuid4())
 
+        prop_id = main_dict[PRIMARY_KEY]
+
+        # डेटा क्लीनिंग (Decimal और None वैल्यू मैनेज करना)
         cleaned_data = clean_and_convert_data(main_dict)
 
+        # DynamoDB में सेव करना
         dynamodb = boto3.resource(
             'dynamodb',
             aws_access_key_id=AWS_ACCESS_KEY_ID,
